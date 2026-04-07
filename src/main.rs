@@ -1,4 +1,4 @@
-//! cli stub. parsing only, for now. the actual run logic comes later.
+//! cli. interp only for now. jit comes later.
 
 use std::process::ExitCode;
 
@@ -11,20 +11,17 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    let eng = match jitvm::Engine::load_file(path) {
+        Ok(e) => e,
         Err(e) => {
-            eprintln!("read {path}: {e}");
+            eprintln!("{e}");
             return ExitCode::FAILURE;
         }
     };
-    match jitvm::parse(&src) {
-        Ok(_) => {
-            println!("parsed ok.");
-            ExitCode::SUCCESS
-        }
+    match eng.run_interp() {
+        Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("parse: {e}");
+            eprintln!("{e}");
             ExitCode::FAILURE
         }
     }
