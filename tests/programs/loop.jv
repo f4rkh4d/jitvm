@@ -1,0 +1,10 @@
+fn main() {
+    let i = 0
+    let s = 0
+    while i < 100 {
+        s = s + i
+        i = i + 1
+    }
+    print s
+    return 0
+}

@@ -1,0 +1,7 @@
+// a file full of comments
+fn main() {
+    // this should just print 1
+    print 1 // trailing is fine
+    // print 999 (commented out)
+    return 0
+}

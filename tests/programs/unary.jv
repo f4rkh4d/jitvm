@@ -1,0 +1,9 @@
+fn main() {
+    print -(-7)
+    print --7
+    print !0
+    print !5
+    let x = 5
+    print -x
+    return 0
+}

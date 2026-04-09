@@ -1,0 +1,14 @@
+fn first_gt(n) {
+    let i = 0
+    while i < 100 {
+        if i > n { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn main() {
+    print first_gt(7)
+    print first_gt(42)
+    return 0
+}

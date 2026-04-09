@@ -1,0 +1,6 @@
+fn main() {
+    // rhs would div by zero; short-circuit saves us
+    if 0 && (10 / 0) { print 1 } else { print 2 }
+    if 1 || (10 / 0) { print 3 } else { print 4 }
+    return 0
+}
