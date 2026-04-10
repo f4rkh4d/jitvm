@@ -5,6 +5,7 @@ pub mod interp;
 pub mod ir;
 pub mod lexer;
 pub mod parser;
+pub mod x86;
 
 use std::fs;
 use std::path::Path;
