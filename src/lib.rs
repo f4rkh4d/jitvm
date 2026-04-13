@@ -1,8 +1,9 @@
-//! jitvm: a toy lang with a bytecode vm. jit comes next.
+//! jitvm: a toy lang with a bytecode vm and an x86-64 jit.
 
 pub mod ast;
 pub mod interp;
 pub mod ir;
+pub mod jit;
 pub mod lexer;
 pub mod parser;
 pub mod x86;
@@ -14,6 +15,7 @@ use std::path::Path;
 pub enum Error {
     Parse(String),
     Runtime(String),
+    Codegen(String),
     Io(std::io::Error),
 }
 
@@ -22,6 +24,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Parse(s) => write!(f, "parse error: {s}"),
             Error::Runtime(s) => write!(f, "runtime error: {s}"),
+            Error::Codegen(s) => write!(f, "codegen error: {s}"),
             Error::Io(e) => write!(f, "io: {e}"),
         }
     }
@@ -53,5 +56,16 @@ impl Engine {
 
     pub fn run_interp(&self) -> Result<i64> {
         interp::run(&self.program)
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    pub fn run_jit(&self) -> Result<i64> {
+        let module = jit::compile(&self.program)?;
+        module.run_main()
+    }
+
+    #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+    pub fn run_jit(&self) -> Result<i64> {
+        Err(Error::Codegen("jit only supported on x86_64 linux/macos".into()))
     }
 }
