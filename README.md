@@ -1,5 +1,7 @@
 # jitvm
 
+_a tiny x86-64 jit. one pass, no llvm, ~12x over the bytecode interpreter on the bench loop. for learning, not for production._
+
 [![ci](https://github.com/f4rkh4d/jitvm/actions/workflows/ci.yml/badge.svg)](https://github.com/f4rkh4d/jitvm/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/jitvm.svg)](https://crates.io/crates/jitvm)
 [![license](https://img.shields.io/crates/l/jitvm.svg)](https://github.com/f4rkh4d/jitvm/blob/main/LICENSE)
@@ -169,3 +171,9 @@ println! uses simd internally. two hours to figure out; annoying.
 if i rewrote it: i'd pick a register-based bytecode so the jit templates
 are shorter, and i'd stop leaking the value stack through every instruction.
 but the template jit pattern is great for a first attempt.
+
+## why one-pass and not two
+
+a two-pass register allocator would buy us another 1.5x or so on a few benchmarks. it would also triple the size of the codegen module and the point of jitvm is "small enough to fit in your head". the current allocator is intentionally bad: it picks the next free callee-saved register, falls back to spilling, and the spill code is dumb.
+
+if you want to see what a serious jit looks like, read the V8 baseline compiler. this is the version where you can read every line in an afternoon.
