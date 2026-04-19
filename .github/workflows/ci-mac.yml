@@ -1,0 +1,14 @@
+name: ci-mac
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cargo test --release --test lang_tests
