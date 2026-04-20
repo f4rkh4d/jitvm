@@ -1,6 +1,8 @@
 # jitvm
 
 [![ci](https://github.com/f4rkh4d/jitvm/actions/workflows/ci.yml/badge.svg)](https://github.com/f4rkh4d/jitvm/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/jitvm.svg)](https://crates.io/crates/jitvm)
+[![license](https://img.shields.io/crates/l/jitvm.svg)](https://github.com/f4rkh4d/jitvm/blob/main/LICENSE)
 
 tiny toy language with a bytecode interpreter and an x86-64 jit i wrote from
 scratch. integers only, functions, recursion. the jit emits raw machine code
@@ -15,8 +17,16 @@ way down.
 
 ## install
 
+from crates.io:
+
 ```
-git clone <this repo>
+cargo install jitvm
+```
+
+or from source:
+
+```
+git clone https://github.com/f4rkh4d/jitvm
 cd jitvm
 cargo build --release
 ```
