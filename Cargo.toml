@@ -2,6 +2,12 @@
 name = "jitvm"
 version = "0.1.0"
 edition = "2021"
+description = "a tiny i64-only language with a bytecode interpreter and a hand-rolled x86-64 jit"
+license = "MIT"
+repository = "https://github.com/f4rkh4d/jitvm"
+readme = "README.md"
+keywords = ["jit", "compiler", "x86-64", "interpreter", "language"]
+categories = ["compilers", "development-tools"]
 
 [dependencies]
 

@@ -2,7 +2,27 @@
 
 ## unreleased
 
-- nothing yet.
+- runtime errors now carry source positions. div-by-zero and mod-by-zero
+  in the interpreter report "runtime error at line N, col M: ...".
+  implemented via a parallel `spans: Vec<Span>` on `ir::Function`; most
+  ops stay at `Span::UNKNOWN` since they can't fault at runtime.
+- `Error::Runtime` grew an `Option<Span>` tail. constructors are
+  `Error::runtime(msg)` and `Error::runtime_at(msg, span)`. use
+  `Error::is_runtime()` to assert the variant without pinning text.
+- the jit now guards `Div` and `Mod` with a `test rcx, rcx; jne skip;
+  call jit_div_by_zero` prelude. on a zero divisor the helper prints
+  a clean message to stderr and exits non-zero instead of raising
+  SIGFPE. span-to-pc mapping for jitted runtime errors is still TODO.
+- docs: `docs/architecture.md`, `docs/jit-internals.md`, and
+  `docs/ir-reference.md`. the jit-internals doc has the REX.B and
+  rel32 bug writeups.
+- examples: `collatz.jv`, `gcd.jv`, `mutrec.jv`, `factorial_loop.jv`,
+  `ackermann_small.jv`, each with a `.expected` captured through the
+  interpreter.
+- `ROADMAP.md` and `CONTRIBUTING.md`.
+- `tests/error_tests.rs`: parse + runtime error coverage.
+- `Cargo.toml`: metadata (description, license, repository, keywords,
+  categories) for eventual crates.io publication.
 
 ## 0.1.0 - 2026-04-20
 

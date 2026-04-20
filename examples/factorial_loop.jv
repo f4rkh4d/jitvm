@@ -1,0 +1,18 @@
+// iterative factorial. prints factorial(1) through factorial(10).
+fn fact(n) {
+  let acc = 1
+  let i = 1
+  while i <= n {
+    acc = acc * i
+    i = i + 1
+  }
+  return acc
+}
+
+fn main() {
+  let k = 1
+  while k <= 10 {
+    print fact(k)
+    k = k + 1
+  }
+}

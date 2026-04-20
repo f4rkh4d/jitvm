@@ -1,0 +1,16 @@
+// ackermann A(2, n) for n in 0..=3. A(3, ...) blows the call stack, on
+// purpose: this language has no tail-call opt and the jit val-stack cap
+// is 64k slots. keep m small.
+fn ack(m, n) {
+  if m == 0 { return n + 1 }
+  if n == 0 { return ack(m - 1, 1) }
+  return ack(m - 1, ack(m, n - 1))
+}
+
+fn main() {
+  let n = 0
+  while n <= 3 {
+    print ack(2, n)
+    n = n + 1
+  }
+}

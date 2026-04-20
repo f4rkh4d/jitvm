@@ -1,0 +1,19 @@
+// mutual recursion. is_even calls is_odd, is_odd calls is_even.
+// prints is_even(0), is_even(1), ..., is_even(9).
+fn is_even(n) {
+  if n == 0 { return 1 }
+  return is_odd(n - 1)
+}
+
+fn is_odd(n) {
+  if n == 0 { return 0 }
+  return is_even(n - 1)
+}
+
+fn main() {
+  let i = 0
+  while i < 10 {
+    print is_even(i)
+    i = i + 1
+  }
+}
