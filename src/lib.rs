@@ -3,9 +3,12 @@
 pub mod ast;
 pub mod interp;
 pub mod ir;
-pub mod jit;
 pub mod lexer;
 pub mod parser;
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+pub mod jit;
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 pub mod x86;
 
 use std::fs;
