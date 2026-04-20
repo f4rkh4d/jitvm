@@ -17,16 +17,35 @@ use std::path::Path;
 #[derive(Debug)]
 pub enum Error {
     Parse(String),
-    Runtime(String),
+    /// runtime error. the optional span, when present, points at the source
+    /// location of the faulting op (e.g. the `/` of a div-by-zero).
+    Runtime(String, Option<ast::Span>),
     Codegen(String),
     Io(std::io::Error),
+}
+
+impl Error {
+    pub fn runtime<S: Into<String>>(msg: S) -> Self {
+        Error::Runtime(msg.into(), None)
+    }
+    pub fn runtime_at<S: Into<String>>(msg: S, span: ast::Span) -> Self {
+        Error::Runtime(msg.into(), Some(span))
+    }
+    /// true iff this is a `Runtime(..)` variant. handy for tests that want to
+    /// assert we hit the runtime-error path without pinning the exact string.
+    pub fn is_runtime(&self) -> bool {
+        matches!(self, Error::Runtime(..))
+    }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Parse(s) => write!(f, "parse error: {s}"),
-            Error::Runtime(s) => write!(f, "runtime error: {s}"),
+            Error::Runtime(s, Some(span)) if span.is_known() => {
+                write!(f, "runtime error at {span}: {s}")
+            }
+            Error::Runtime(s, _) => write!(f, "runtime error: {s}"),
             Error::Codegen(s) => write!(f, "codegen error: {s}"),
             Error::Io(e) => write!(f, "io: {e}"),
         }

@@ -1,6 +1,7 @@
 //! tree-walking-ish stack interpreter over the bytecode.
 //! used as the oracle for jit tests and the baseline for the benchmark.
 
+use crate::ast::Span;
 use crate::ir::{Function, Op, Program};
 use crate::{Error, Result};
 use std::cell::RefCell;
@@ -34,14 +35,14 @@ fn do_print(v: i64) {
 pub fn run(prog: &Program) -> Result<i64> {
     let main = &prog.fns[prog.main_id as usize];
     if main.argc != 0 {
-        return Err(Error::Runtime("main() must take no arguments".into()));
+        return Err(Error::runtime("main() must take no arguments"));
     }
     call(prog, main, &[])
 }
 
 fn call(prog: &Program, f: &Function, args: &[i64]) -> Result<i64> {
     if args.len() != f.argc as usize {
-        return Err(Error::Runtime(format!(
+        return Err(Error::runtime(format!(
             "arity mismatch calling {}: expected {}, got {}",
             f.name,
             f.argc,
@@ -58,6 +59,7 @@ fn call(prog: &Program, f: &Function, args: &[i64]) -> Result<i64> {
 
     loop {
         let op = f.code[pc];
+        let span = f.spans.get(pc).copied().unwrap_or(Span::UNKNOWN);
         pc += 1;
         match op {
             Op::Const(v) => stack.push(v),
@@ -68,7 +70,7 @@ fn call(prog: &Program, f: &Function, args: &[i64]) -> Result<i64> {
             Op::StoreLocal(s) => {
                 let v = stack
                     .pop()
-                    .ok_or_else(|| Error::Runtime("stack underflow".into()))?;
+                    .ok_or_else(|| Error::runtime("stack underflow"))?;
                 slots[s as usize] = v;
             }
             Op::LoadArg(a) => {
@@ -79,39 +81,27 @@ fn call(prog: &Program, f: &Function, args: &[i64]) -> Result<i64> {
             Op::Sub => binop(&mut stack, |a, b| a.wrapping_sub(b))?,
             Op::Mul => binop(&mut stack, |a, b| a.wrapping_mul(b))?,
             Op::Div => {
-                let b = stack
-                    .pop()
-                    .ok_or_else(|| Error::Runtime("underflow".into()))?;
-                let a = stack
-                    .pop()
-                    .ok_or_else(|| Error::Runtime("underflow".into()))?;
+                let b = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
+                let a = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
                 if b == 0 {
-                    return Err(Error::Runtime("division by zero".into()));
+                    return Err(Error::runtime_at("division by zero", span));
                 }
                 stack.push(a.wrapping_div(b));
             }
             Op::Mod => {
-                let b = stack
-                    .pop()
-                    .ok_or_else(|| Error::Runtime("underflow".into()))?;
-                let a = stack
-                    .pop()
-                    .ok_or_else(|| Error::Runtime("underflow".into()))?;
+                let b = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
+                let a = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
                 if b == 0 {
-                    return Err(Error::Runtime("mod by zero".into()));
+                    return Err(Error::runtime_at("mod by zero", span));
                 }
                 stack.push(a.wrapping_rem(b));
             }
             Op::Neg => {
-                let v = stack
-                    .pop()
-                    .ok_or_else(|| Error::Runtime("underflow".into()))?;
+                let v = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
                 stack.push(v.wrapping_neg());
             }
             Op::Not => {
-                let v = stack
-                    .pop()
-                    .ok_or_else(|| Error::Runtime("underflow".into()))?;
+                let v = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
                 stack.push(if v == 0 { 1 } else { 0 });
             }
             Op::Lt => cmp(&mut stack, |a, b| a < b)?,
@@ -124,9 +114,7 @@ fn call(prog: &Program, f: &Function, args: &[i64]) -> Result<i64> {
                 pc = (pc as i32 + off) as usize;
             }
             Op::JumpIfFalse(off) => {
-                let v = stack
-                    .pop()
-                    .ok_or_else(|| Error::Runtime("underflow".into()))?;
+                let v = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
                 if v == 0 {
                     pc = (pc as i32 + off) as usize;
                 }
@@ -134,10 +122,13 @@ fn call(prog: &Program, f: &Function, args: &[i64]) -> Result<i64> {
             Op::Call(id, argc) => {
                 let callee = &prog.fns[id as usize];
                 if callee.argc != argc {
-                    return Err(Error::Runtime(format!(
-                        "arity mismatch calling {}",
-                        callee.name
-                    )));
+                    return Err(Error::runtime_at(
+                        format!(
+                            "arity mismatch calling {}: expected {}, got {}",
+                            callee.name, callee.argc, argc
+                        ),
+                        span,
+                    ));
                 }
                 let at = stack.len() - argc as usize;
                 let args: Vec<i64> = stack.split_off(at);
@@ -148,9 +139,7 @@ fn call(prog: &Program, f: &Function, args: &[i64]) -> Result<i64> {
                 return Ok(stack.pop().unwrap_or(0));
             }
             Op::Print => {
-                let v = stack
-                    .pop()
-                    .ok_or_else(|| Error::Runtime("underflow".into()))?;
+                let v = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
                 do_print(v);
             }
             Op::Pop => {
@@ -161,23 +150,15 @@ fn call(prog: &Program, f: &Function, args: &[i64]) -> Result<i64> {
 }
 
 fn binop(stack: &mut Vec<i64>, f: impl FnOnce(i64, i64) -> i64) -> Result<()> {
-    let b = stack
-        .pop()
-        .ok_or_else(|| Error::Runtime("underflow".into()))?;
-    let a = stack
-        .pop()
-        .ok_or_else(|| Error::Runtime("underflow".into()))?;
+    let b = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
+    let a = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
     stack.push(f(a, b));
     Ok(())
 }
 
 fn cmp(stack: &mut Vec<i64>, f: impl FnOnce(i64, i64) -> bool) -> Result<()> {
-    let b = stack
-        .pop()
-        .ok_or_else(|| Error::Runtime("underflow".into()))?;
-    let a = stack
-        .pop()
-        .ok_or_else(|| Error::Runtime("underflow".into()))?;
+    let b = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
+    let a = stack.pop().ok_or_else(|| Error::runtime("underflow"))?;
     stack.push(if f(a, b) { 1 } else { 0 });
     Ok(())
 }

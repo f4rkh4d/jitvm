@@ -1,7 +1,7 @@
 //! recursive-descent + pratt parser. top-level is a list of fn defs and/or
 //! top-level statements; top-level stmts get bundled into a synthesized main().
 
-use crate::ast::*;
+use crate::ast::{Span, *};
 use crate::lexer::{Tok, Token};
 use crate::{Error, Result};
 
@@ -16,6 +16,10 @@ impl<'a> P<'a> {
     }
     fn line(&self) -> u32 {
         self.toks[self.pos].line
+    }
+    fn span(&self) -> Span {
+        let t = &self.toks[self.pos];
+        Span::new(t.line, t.col)
     }
     fn bump(&mut self) -> Tok {
         let t = self.toks[self.pos].tok.clone();
@@ -214,9 +218,10 @@ fn parse_prec(p: &mut P, min_bp: u8) -> Result<Expr> {
         if lbp < min_bp {
             break;
         }
+        let op_span = p.span();
         p.bump();
         let rhs = parse_prec(p, lbp + 1)?;
-        lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
+        lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs), op_span);
     }
     Ok(lhs)
 }

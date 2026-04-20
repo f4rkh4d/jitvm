@@ -13,6 +13,19 @@ thread_local! {
     pub static PRINT_CAPTURE: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
+/// invoked from jitted code when a divisor is zero. rather than letting
+/// `idiv rcx` raise SIGFPE (which the host hears as "the jit segfaulted"),
+/// we detour here and exit cleanly with the same message the interpreter
+/// would have produced. span info isn't threaded into the jit yet, so the
+/// message is bare; see docs/jit-internals.md for the plan.
+pub extern "sysv64" fn jit_div_by_zero() -> ! {
+    eprintln!("runtime error: division by zero");
+    // `std::process::exit` runs atexit handlers + drops, which segfault
+    // when we're called from inside jit'd code (the stack is in a shape
+    // rust doesn't know how to unwind). `_exit` just terminates.
+    unsafe { libc::_exit(1) }
+}
+
 pub extern "sysv64" fn jit_print(v: i64) {
     let captured = PRINT_CAPTURE.with(|c| {
         if let Some(b) = c.borrow_mut().as_mut() {
@@ -151,6 +164,22 @@ fn mov_r14_r13(b: &mut Vec<u8>) {
     emit(b, &[0x4D, 0x89, 0xEE]);
 }
 
+/// emit: `test rcx, rcx; jne skip; <save regs + align>; mov rax, helper;
+/// call rax; (never returns); skip:`. keeps rsp 16-aligned at the call.
+fn emit_divzero_guard(buf: &mut Vec<u8>) {
+    test_reg_reg(buf, Reg::Rcx, Reg::Rcx);
+    let jne_patch = jcc_rel32(buf, CC_NE, 0);
+    // the helper is `-> !` and doesn't return, but we still pad rsp so a
+    // debugger backtrace through the call frame is sane.
+    push_reg(buf, Reg::Rdi); // alignment pad (rsp was 16-aligned in body).
+    mov_reg_imm64(buf, Reg::Rax, jit_div_by_zero as *const () as i64);
+    call_reg(buf, Reg::Rax);
+    // unreachable, but we pop to keep the emitted frame self-consistent.
+    pop_reg(buf, Reg::Rdi);
+    let skip = buf.len();
+    patch_rel32(buf, jne_patch, skip);
+}
+
 struct CompiledFn {
     start: usize,
     op_offsets: Vec<usize>,
@@ -222,6 +251,7 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
             Op::Div => {
                 pop_val_rcx(buf);
                 pop_val_rax(buf);
+                emit_divzero_guard(buf);
                 cqo(buf);
                 idiv_reg(buf, Reg::Rcx);
                 push_val_rax(buf);
@@ -229,6 +259,7 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
             Op::Mod => {
                 pop_val_rcx(buf);
                 pop_val_rax(buf);
+                emit_divzero_guard(buf);
                 cqo(buf);
                 idiv_reg(buf, Reg::Rcx);
                 mov_reg_reg(buf, Reg::Rax, Reg::Rdx);

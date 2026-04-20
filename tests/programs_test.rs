@@ -10,6 +10,7 @@
 use jitvm::{interp, Engine};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 use std::process::Command;
 
 fn collect_programs() -> Vec<(String, PathBuf, String, String)> {
