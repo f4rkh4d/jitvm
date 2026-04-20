@@ -32,7 +32,9 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self { Error::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -66,6 +68,8 @@ impl Engine {
 
     #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
     pub fn run_jit(&self) -> Result<i64> {
-        Err(Error::Codegen("jit only supported on x86_64 linux/macos".into()))
+        Err(Error::Codegen(
+            "jit only supported on x86_64 linux/macos".into(),
+        ))
     }
 }
