@@ -1,10 +1,12 @@
 //! jitvm: a toy lang with a bytecode vm and an x86-64 jit.
 
 pub mod ast;
+pub mod heap;
 pub mod interp;
 pub mod ir;
 pub mod lexer;
 pub mod parser;
+pub mod value;
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 pub mod jit;
