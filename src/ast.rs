@@ -76,8 +76,9 @@ pub enum UnOp {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
+    Str(String, Span),
     Var(String),
-    Call(String, Vec<Expr>),
+    Call(String, Vec<Expr>, Span),
     /// Bin carries the operator's source span so runtime errors like
     /// div-by-zero can report the faulting position.
     Bin(BinOp, Box<Expr>, Box<Expr>, Span),

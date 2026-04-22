@@ -5,6 +5,7 @@ use crate::{Error, Result};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     Int(i64),
+    StrLit(String),
     Ident(String),
     Fn,
     Let,
@@ -74,6 +75,67 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
 
         let start_line = line;
         let start_col = col;
+
+        if c == '"' {
+            // string literal. handle the four escapes we care about:
+            // \n, \t, \\, \". other backslash sequences are rejected.
+            i += 1;
+            col += 1;
+            let mut s = String::new();
+            loop {
+                if i >= bytes.len() {
+                    return Err(Error::Parse(format!(
+                        "unterminated string literal at {start_line}:{start_col}"
+                    )));
+                }
+                let b = bytes[i];
+                if b == b'"' {
+                    i += 1;
+                    col += 1;
+                    break;
+                }
+                if b == b'\n' {
+                    // newlines inside string literals are not allowed in
+                    // 0.2. use \n if you want one.
+                    return Err(Error::Parse(format!(
+                        "newline inside string literal at {start_line}:{start_col}"
+                    )));
+                }
+                if b == b'\\' {
+                    if i + 1 >= bytes.len() {
+                        return Err(Error::Parse(format!(
+                            "dangling backslash in string at {line}:{col}"
+                        )));
+                    }
+                    let esc = bytes[i + 1];
+                    let ch = match esc {
+                        b'n' => '\n',
+                        b't' => '\t',
+                        b'\\' => '\\',
+                        b'"' => '"',
+                        other => {
+                            return Err(Error::Parse(format!(
+                                "unknown escape \\{} at {}:{}",
+                                other as char, line, col
+                            )));
+                        }
+                    };
+                    s.push(ch);
+                    i += 2;
+                    col += 2;
+                    continue;
+                }
+                s.push(b as char);
+                i += 1;
+                col += 1;
+            }
+            out.push(Token {
+                tok: Tok::StrLit(s),
+                line: start_line,
+                col: start_col,
+            });
+            continue;
+        }
 
         if c.is_ascii_digit() {
             let mut v: i64 = 0;

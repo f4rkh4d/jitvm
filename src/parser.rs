@@ -243,8 +243,10 @@ fn parse_unary(p: &mut P) -> Result<Expr> {
 }
 
 fn parse_atom(p: &mut P) -> Result<Expr> {
+    let span = p.span();
     match p.bump() {
         Tok::Int(n) => Ok(Expr::Int(n)),
+        Tok::StrLit(s) => Ok(Expr::Str(s, span)),
         Tok::LParen => {
             let e = parse_expr(p)?;
             p.eat(&Tok::RParen)?;
@@ -265,7 +267,7 @@ fn parse_atom(p: &mut P) -> Result<Expr> {
                     }
                 }
                 p.eat(&Tok::RParen)?;
-                Ok(Expr::Call(name, args))
+                Ok(Expr::Call(name, args, span))
             } else {
                 Ok(Expr::Var(name))
             }
