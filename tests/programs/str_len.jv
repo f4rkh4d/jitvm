@@ -1,0 +1,5 @@
+fn main() {
+    print len("abcde")
+    print len("")
+    return 0
+}

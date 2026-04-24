@@ -2,12 +2,21 @@
 //!
 //! each function is one `Function`. jumps are *relative* to the pc *after*
 //! the jump op, so `pc = pc + offset` after reading.
+//!
+//! 0.2: `Op::Const(i64)` now stores the **tagged** value directly. the
+//! lowerer shifts source integer literals left by 1 before emitting so the
+//! interp and jit both see pre-tagged values on the val stack. see
+//! `src/value.rs` for the tag scheme.
 
 use crate::ast::{Span, *};
+use crate::value;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Op {
+    /// push an already-tagged 64-bit value. for int literals the lowerer
+    /// shifts before emitting; for "logical" constants like 0/1 (used by
+    /// `&&`/`||` lowering) the lowerer also shifts.
     Const(i64),
     LoadLocal(u16),
     StoreLocal(u16),
@@ -31,6 +40,12 @@ pub enum Op {
     Ret,
     Print,
     Pop,
+    /// push a tagged pointer to the interned string at `string_pool[id]`.
+    Str(u32),
+    /// pop two tagged string pointers, push a new tagged string pointer.
+    Concat,
+    /// pop a tagged string pointer, push its length (tagged int).
+    StrLen,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +65,9 @@ pub struct Function {
 pub struct Program {
     pub fns: Vec<Function>,
     pub main_id: u32,
+    /// literal string pool. `Op::Str(id)` indexes this. duplicates in the
+    /// source collapse to the same id.
+    pub string_pool: Vec<String>,
 }
 
 pub fn lower(prog: &ProgramAst) -> Result<Program> {
@@ -65,10 +83,15 @@ pub fn lower(prog: &ProgramAst) -> Result<Program> {
         .ok_or_else(|| Error::Parse("no main() function".into()))?;
 
     let mut fns = Vec::with_capacity(prog.fns.len());
+    let mut string_pool: Vec<String> = Vec::new();
     for f in &prog.fns {
-        fns.push(lower_fn(f, &name_to_id)?);
+        fns.push(lower_fn(f, &name_to_id, &mut string_pool)?);
     }
-    Ok(Program { fns, main_id })
+    Ok(Program {
+        fns,
+        main_id,
+        string_pool,
+    })
 }
 
 type ProgramAst = crate::ast::Program;
@@ -80,20 +103,26 @@ struct Lowerer<'a> {
     locals: Vec<String>,
     argc: u8,
     name_to_id: &'a std::collections::HashMap<String, u32>,
+    string_pool: &'a mut Vec<String>,
 }
 
-fn lower_fn(f: &Fn, name_to_id: &std::collections::HashMap<String, u32>) -> Result<Function> {
+fn lower_fn(
+    f: &Fn,
+    name_to_id: &std::collections::HashMap<String, u32>,
+    string_pool: &mut Vec<String>,
+) -> Result<Function> {
     let mut l = Lowerer {
         code: Vec::new(),
         spans: Vec::new(),
         locals: f.params.clone(),
         argc: f.params.len() as u8,
         name_to_id,
+        string_pool,
     };
     for s in &f.body {
         l.stmt(s)?;
     }
-    // implicit return 0 if control falls through
+    // implicit return 0 if control falls through. 0 tagged as int is 0.
     l.emit(Op::Const(0));
     l.emit(Op::Ret);
     let locals_count = (l.locals.len() as u16).saturating_sub(l.argc as u16);
@@ -133,6 +162,29 @@ impl<'a> Lowerer<'a> {
     fn emit_at(&mut self, op: Op, span: Span) {
         self.code.push(op);
         self.spans.push(span);
+    }
+
+    /// intern a literal in the shared string pool. duplicates collapse.
+    fn intern(&mut self, s: &str) -> u32 {
+        if let Some(i) = self.string_pool.iter().position(|x| x == s) {
+            return i as u32;
+        }
+        let id = self.string_pool.len() as u32;
+        self.string_pool.push(s.to_string());
+        id
+    }
+
+    /// push a tagged int constant, checking the i63 range at compile time.
+    fn emit_int_const(&mut self, v: i64) -> Result<()> {
+        if !value::fits_int(v) {
+            return Err(Error::Parse(format!(
+                "integer literal {v} doesn't fit in i63 (range {}..={})",
+                value::INT_MIN,
+                value::INT_MAX
+            )));
+        }
+        self.emit(Op::Const(value::pack_int(v)));
+        Ok(())
     }
 
     fn stmt(&mut self, s: &Stmt) -> Result<()> {
@@ -215,7 +267,11 @@ impl<'a> Lowerer<'a> {
 
     fn expr(&mut self, e: &Expr) -> Result<()> {
         match e {
-            Expr::Int(v) => self.emit(Op::Const(*v)),
+            Expr::Int(v) => self.emit_int_const(*v)?,
+            Expr::Str(s, _span) => {
+                let id = self.intern(s);
+                self.emit(Op::Str(id));
+            }
             Expr::Var(name) => {
                 let (is_arg, slot) = self
                     .resolve(name)
@@ -226,9 +282,34 @@ impl<'a> Lowerer<'a> {
                     self.emit(Op::LoadLocal(slot));
                 }
             }
-            Expr::Call(name, args) => {
+            Expr::Call(name, args, _span) => {
+                // privileged builtins.
+                if name == "len" {
+                    if args.len() != 1 {
+                        return Err(Error::Parse(format!(
+                            "len() takes exactly 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    self.expr(&args[0])?;
+                    self.emit(Op::StrLen);
+                    return Ok(());
+                }
                 if name == "print" {
-                    return Err(Error::Parse("print must be used as a statement".into()));
+                    // print is usually a statement, but the call form is
+                    // useful in expression position - return value is 0.
+                    if args.len() != 1 {
+                        return Err(Error::Parse(format!(
+                            "print() takes exactly 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    self.expr(&args[0])?;
+                    self.emit(Op::Print);
+                    // print has no meaningful return; push tagged 0 so the
+                    // expression has a value.
+                    self.emit(Op::Const(value::pack_int(0)));
+                    return Ok(());
                 }
                 let id = *self
                     .name_to_id
@@ -239,17 +320,7 @@ impl<'a> Lowerer<'a> {
                         "call to {name} has >6 args; limit is 6"
                     )));
                 }
-                // arity check at lowering time: catches the mistake at compile
-                // time rather than turning it into a silent stack misalignment.
-                let callee_argc = {
-                    // we resolve name->id above; fetch the declared argc by id
-                    // via the same map + caller-supplied Vec (rebuilt in lower).
-                    // to keep the lowerer independent of final fn vec ordering,
-                    // we just defer the argc check to runtime for now, where
-                    // interp::call already verifies. codegen mirrors that by
-                    // always pushing exactly args.len() values.
-                    args.len() as u8
-                };
+                let callee_argc = args.len() as u8;
                 for a in args {
                     self.expr(a)?;
                 }
@@ -267,33 +338,30 @@ impl<'a> Lowerer<'a> {
                     BinOp::And => {
                         // short-circuit: eval a; if false, result is 0; else result is (b != 0).
                         self.expr(a)?;
-                        // a is on stack. jif over true-branch, leaving 0.
                         let jf = self.code.len();
                         self.emit(Op::JumpIfFalse(0));
-                        // a was truthy; pop'd by jif. now eval b and normalize to bool.
                         self.expr(b)?;
-                        self.emit(Op::Const(0));
+                        self.emit(Op::Const(value::pack_int(0)));
                         self.emit(Op::Ne);
                         let jmp_end = self.code.len();
                         self.emit(Op::Jump(0));
                         let false_start = self.code.len();
                         self.patch_jif(jf, false_start);
-                        self.emit(Op::Const(0));
+                        self.emit(Op::Const(value::pack_int(0)));
                         let end = self.code.len();
                         self.patch_jmp(jmp_end, end);
                     }
                     BinOp::Or => {
                         self.expr(a)?;
-                        // if a is true, result is 1; else result is (b != 0).
                         let jf = self.code.len();
                         self.emit(Op::JumpIfFalse(0));
-                        self.emit(Op::Const(1));
+                        self.emit(Op::Const(value::pack_int(1)));
                         let jmp_end = self.code.len();
                         self.emit(Op::Jump(0));
                         let b_start = self.code.len();
                         self.patch_jif(jf, b_start);
                         self.expr(b)?;
-                        self.emit(Op::Const(0));
+                        self.emit(Op::Const(value::pack_int(0)));
                         self.emit(Op::Ne);
                         let end = self.code.len();
                         self.patch_jmp(jmp_end, end);
@@ -315,9 +383,6 @@ impl<'a> Lowerer<'a> {
                             BinOp::Ne => Op::Ne,
                             BinOp::And | BinOp::Or => unreachable!(),
                         };
-                        // attach source position only for the ops that can
-                        // actually trap. everything else gets UNKNOWN, saves
-                        // bytes in the no-op path.
                         match op {
                             BinOp::Div | BinOp::Mod => self.emit_at(out, *span),
                             _ => self.emit(out),

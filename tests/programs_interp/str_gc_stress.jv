@@ -1,0 +1,12 @@
+fn main() {
+    // allocate a ton of throwaway strings. the live set stays at one
+    // pointer (`s`) so the gc should reclaim almost everything.
+    let s = "base"
+    let i = 0
+    while i < 500 {
+        s = "x" + "y"
+        i = i + 1
+    }
+    print len(s)
+    return 0
+}

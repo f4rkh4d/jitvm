@@ -1,0 +1,5 @@
+// interp-only
+fn main() {
+    print "abcde" + "fghij"
+    return 0
+}

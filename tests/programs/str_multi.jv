@@ -1,0 +1,8 @@
+fn main() {
+    print "alpha"
+    print "beta"
+    print "gamma"
+    print "delta"
+    print "epsilon"
+    return 0
+}

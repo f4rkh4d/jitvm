@@ -1,0 +1,5 @@
+// interp-only
+fn main() {
+    print "" + "xxx" + ""
+    return 0
+}

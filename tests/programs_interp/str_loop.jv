@@ -1,0 +1,10 @@
+fn main() {
+    let s = ""
+    let i = 0
+    while i < 100 {
+        s = s + "a"
+        i = i + 1
+    }
+    print len(s)
+    return 0
+}
