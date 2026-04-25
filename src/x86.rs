@@ -211,6 +211,62 @@ pub fn patch_rel32(buf: &mut [u8], pos: usize, target: usize) {
     buf[pos..pos + 4].copy_from_slice(&rel.to_le_bytes());
 }
 
+/// shl r64, 1    REX.W + D1 /4
+pub fn shl_reg_1(buf: &mut Vec<u8>, r: Reg) {
+    buf.push(rex_w(false, r.is_high()));
+    buf.push(0xD1);
+    buf.push(modrm(0b11, 4, r.low3()));
+}
+
+/// sar r64, 1    REX.W + D1 /7 (arithmetic shift right, preserves sign)
+pub fn sar_reg_1(buf: &mut Vec<u8>, r: Reg) {
+    buf.push(rex_w(false, r.is_high()));
+    buf.push(0xD1);
+    buf.push(modrm(0b11, 7, r.low3()));
+}
+
+/// and r64, imm8    REX.W + 83 /4 ib  (sign-extended imm8)
+pub fn and_reg_imm8(buf: &mut Vec<u8>, r: Reg, imm: i8) {
+    buf.push(rex_w(false, r.is_high()));
+    buf.push(0x83);
+    buf.push(modrm(0b11, 4, r.low3()));
+    buf.push(imm as u8);
+}
+
+/// or r64, imm8    REX.W + 83 /1 ib (sign-extended imm8)
+pub fn or_reg_imm8(buf: &mut Vec<u8>, r: Reg, imm: i8) {
+    buf.push(rex_w(false, r.is_high()));
+    buf.push(0x83);
+    buf.push(modrm(0b11, 1, r.low3()));
+    buf.push(imm as u8);
+}
+
+/// test r64, imm32    REX.W + F7 /0 id
+pub fn test_reg_imm32(buf: &mut Vec<u8>, r: Reg, imm: i32) {
+    buf.push(rex_w(false, r.is_high()));
+    buf.push(0xF7);
+    buf.push(modrm(0b11, 0, r.low3()));
+    buf.extend_from_slice(&imm.to_le_bytes());
+}
+
+/// movzx r64, [reg]   (dword load, zero-extend). REX.W + 8B /r for a
+/// dword load would need operand-size prefix trickery; easier is:
+/// mov r32, [reg]   8B /r    (implicit zero-extend to r64).
+/// this emits: REX?(for dst) + 8B /r with mod=00 rm=src (no SIB / disp).
+pub fn mov_r32_from_mem_reg(buf: &mut Vec<u8>, dst: Reg, src: Reg) {
+    // only valid for src in rax..rdi (no SIB). for r8-r15 we need REX.B.
+    // dst r8-r15 needs REX.R.
+    let rex =
+        0x40 | (if dst.is_high() { 0b0100 } else { 0 }) | (if src.is_high() { 0b0001 } else { 0 });
+    if rex != 0x40 {
+        buf.push(rex);
+    }
+    buf.push(0x8B);
+    // src == rsp or rbp requires SIB / disp8 respectively; we never use
+    // those as source here so a plain mod=00 is fine.
+    buf.push(modrm(0b00, dst.low3(), src.low3()));
+}
+
 /// mov reg, [rbp + disp]   REX.W + 0x8B /r  (disp8 or disp32)
 pub fn mov_reg_rbp_disp(buf: &mut Vec<u8>, dst: Reg, disp: i32) {
     buf.push(rex_w(dst.is_high(), false));

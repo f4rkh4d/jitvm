@@ -3,6 +3,22 @@
 //! the base index of the current frame's locals.
 //!
 //! only built on x86-64 linux/macos.
+//!
+//! 0.2: values on the val stack are **tagged** (see `src/value.rs`).
+//! arithmetic stays in tagged form where possible:
+//!
+//! - add/sub on tagged ints: `(i<<1) + (j<<1) = (i+j)<<1`. plain add/sub.
+//! - mul: `(i<<1) * (j<<1) = (i*j)<<2`. after imul, sar rax, 1 to untag once.
+//! - div: `(i<<1) / (j<<1) = i/j` (untagged). shl rax, 1 to re-tag.
+//! - mod: `(i<<1) % (j<<1) = (i%j)<<1`. already tagged.
+//! - cmp/setcc: tagged cmp is the same as untagged for ints since shift
+//!   is monotonic; setcc gives 0/1 in al, we shl rax, 1 to tag the result.
+//! - neg: operates on the whole 64-bit register; `neg (i<<1) = -(i)<<1`. ok.
+//!
+//! these templates ASSUME both operands are tagged ints. the jit does NOT
+//! do tag-dispatch in 0.2 - feeding it a pointer where it expects an int
+//! is undefined. the interp (used as the correctness oracle) does check
+//! tags. tag-dispatch + jit string arithmetic is v0.3 work.
 
 use crate::ir::{Function, Op, Program};
 use crate::x86::*;
@@ -20,23 +36,94 @@ thread_local! {
 /// message is bare; see docs/jit-internals.md for the plan.
 pub extern "sysv64" fn jit_div_by_zero() -> ! {
     eprintln!("runtime error: division by zero");
-    // `std::process::exit` runs atexit handlers + drops, which segfault
-    // when we're called from inside jit'd code (the stack is in a shape
-    // rust doesn't know how to unwind). `_exit` just terminates.
     unsafe { libc::_exit(1) }
 }
 
-pub extern "sysv64" fn jit_print(v: i64) {
+/// print a tagged int. the int is passed already in its tagged form; we
+/// unpack via `v >> 1` before formatting.
+pub extern "sysv64" fn jit_print_int(v: i64) {
+    let i = v >> 1;
     let captured = PRINT_CAPTURE.with(|c| {
         if let Some(b) = c.borrow_mut().as_mut() {
-            b.push(v.to_string());
+            b.push(i.to_string());
             true
         } else {
             false
         }
     });
     if !captured {
-        println!("{v}");
+        println!("{i}");
+    }
+}
+
+/// print a heap string. `ptr` is the header address; the `len` field is a
+/// u32 at offset 0 and the bytes start at offset 8.
+pub extern "sysv64" fn jit_print_str(ptr: *const u8) {
+    // SAFETY: the caller guarantees `ptr` came from a live literal in the
+    // jit's interned-literal arena (never collected in 0.2). we only read
+    // `len` (u32 at offset 0) and the `len` bytes at offset 8.
+    let (len, bytes) = unsafe {
+        let len = std::ptr::read_unaligned(ptr as *const u32) as usize;
+        let data = ptr.add(8);
+        (len, std::slice::from_raw_parts(data, len))
+    };
+    let s = String::from_utf8_lossy(bytes).to_string();
+    let captured = PRINT_CAPTURE.with(|c| {
+        if let Some(b) = c.borrow_mut().as_mut() {
+            b.push(s.clone());
+            true
+        } else {
+            false
+        }
+    });
+    if !captured {
+        println!("{s}");
+        let _ = len; // silence unused when stdout is a tty
+    }
+}
+
+/// the jit's own never-collected literal arena. the JIT in 0.2 only
+/// handles string literals (not runtime concat), so we can leak: allocate
+/// every interned literal once at compile time, keep it alive for the
+/// module's lifetime, and hand raw pointers into the emitted code.
+///
+/// this also sidesteps the safepoint + stackmap work that a collecting jit
+/// would need; see `docs/v0.2-plan.md` for the rationale.
+struct JitHeap {
+    buf: Box<[u8]>,
+    offsets: Vec<usize>,
+}
+
+impl JitHeap {
+    fn build(pool: &[String]) -> Self {
+        // layout each literal as u32 len, u32 hash, bytes, pad to 8.
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::with_capacity(pool.len());
+        for s in pool {
+            // pad start to 8 so each header is 8-aligned (low 3 bits zero,
+            // which our tag scheme relies on).
+            while bytes.len() % 8 != 0 {
+                bytes.push(0);
+            }
+            offsets.push(bytes.len());
+            let len = s.len() as u32;
+            let hash = crate::heap::fnv1a(s.as_bytes());
+            bytes.extend_from_slice(&len.to_le_bytes());
+            bytes.extend_from_slice(&hash.to_le_bytes());
+            bytes.extend_from_slice(s.as_bytes());
+        }
+        // final pad
+        while bytes.len() % 8 != 0 {
+            bytes.push(0);
+        }
+        JitHeap {
+            buf: bytes.into_boxed_slice(),
+            offsets,
+        }
+    }
+
+    fn ptr_of(&self, id: usize) -> *const u8 {
+        unsafe { self.buf.as_ptr().add(self.offsets[id]) }
     }
 }
 
@@ -44,6 +131,10 @@ pub struct CompiledModule {
     mem: *mut libc::c_void,
     size: usize,
     main_entry: usize,
+    /// keep the literal arena alive for the lifetime of the module. the
+    /// emitted code holds raw pointers into this box.
+    #[allow(dead_code)]
+    jit_heap: JitHeap,
 }
 
 unsafe impl Send for CompiledModule {}
@@ -65,7 +156,13 @@ impl CompiledModule {
         let sp = stack.as_mut_ptr();
         let rv = unsafe { invoke(self.main_entry, sp) };
         drop(stack);
-        Ok(rv)
+        // rv is tagged. unpack if it's an int; otherwise hand back raw
+        // (caller is typically interactive and only looks at prints).
+        if rv & 1 == 0 {
+            Ok(rv >> 1)
+        } else {
+            Ok(rv)
+        }
     }
 }
 
@@ -89,8 +186,6 @@ unsafe fn invoke(entry: usize, stack_ptr: *mut i64) -> i64 {
 }
 
 // Extra encodings we need for the jit, using the x86 module's low-level helpers.
-// The x86 module mostly covers reg/reg ops; here we add r14 imm ops and
-// sib-memory addressing for [r15 + r14*8] and [r15 + r13*8 + disp].
 
 fn emit(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(bytes);
@@ -114,11 +209,6 @@ fn sub_r13_imm32(b: &mut Vec<u8>, v: i32) {
     emit_i32(b, v);
 }
 
-// REX.W + REX.X + REX.B = 0x4B for SIB ops where both index and base are r8-r15.
-// earlier versions had 0x4A here (missing REX.B for the r15 base); the effect
-// was that [r15 + ...] accesses silently went through rdi. they worked by luck
-// while rdi still held the initial stack_ptr value that rust's asm block
-// happened to place there, then crashed the moment jit_print clobbered rdi.
 // mov [r15 + r14*8], rax
 fn store_rax_top(b: &mut Vec<u8>) {
     emit(b, &[0x4B, 0x89, 0x04, 0xF7]);
@@ -164,17 +254,12 @@ fn mov_r14_r13(b: &mut Vec<u8>) {
     emit(b, &[0x4D, 0x89, 0xEE]);
 }
 
-/// emit: `test rcx, rcx; jne skip; <save regs + align>; mov rax, helper;
-/// call rax; (never returns); skip:`. keeps rsp 16-aligned at the call.
 fn emit_divzero_guard(buf: &mut Vec<u8>) {
     test_reg_reg(buf, Reg::Rcx, Reg::Rcx);
     let jne_patch = jcc_rel32(buf, CC_NE, 0);
-    // the helper is `-> !` and doesn't return, but we still pad rsp so a
-    // debugger backtrace through the call frame is sane.
-    push_reg(buf, Reg::Rdi); // alignment pad (rsp was 16-aligned in body).
+    push_reg(buf, Reg::Rdi);
     mov_reg_imm64(buf, Reg::Rax, jit_div_by_zero as *const () as i64);
     call_reg(buf, Reg::Rax);
-    // unreachable, but we pop to keep the emitted frame self-consistent.
     pop_reg(buf, Reg::Rdi);
     let skip = buf.len();
     patch_rel32(buf, jne_patch, skip);
@@ -187,15 +272,12 @@ struct CompiledFn {
     call_patches: Vec<(usize, u32)>,
 }
 
-fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
+fn emit_fn(buf: &mut Vec<u8>, f: &Function, jit_heap: &JitHeap) -> Result<CompiledFn> {
     let start = buf.len();
     let mut op_offsets = Vec::with_capacity(f.code.len() + 1);
     let mut jump_patches = Vec::new();
     let mut call_patches = Vec::new();
 
-    // prologue. stack alignment on entry is 8 mod 16 (retaddr just pushed by call).
-    // push rbp (+8) -> 0 mod 16. push r13 (+8) -> 8 mod 16. push rdi (+8) -> 0 mod 16.
-    // so inside the body rsp is 16-aligned, which is what sysv requires at a call site.
     push_reg(buf, Reg::Rbp);
     mov_reg_reg(buf, Reg::Rbp, Reg::Rsp);
     push_reg(buf, Reg::R13);
@@ -212,6 +294,8 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
         op_offsets.push(buf.len());
         match *op {
             Op::Const(n) => {
+                // n is already the tagged representation; the lowerer
+                // shifted int literals before emitting.
                 mov_reg_imm64(buf, Reg::Rax, n);
                 push_val_rax(buf);
             }
@@ -231,6 +315,7 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
                 store_local_rax(buf, s);
             }
             Op::Add => {
+                // tagged-form add works directly.
                 pop_val_rcx(buf);
                 pop_val_rax(buf);
                 add_reg_reg(buf, Reg::Rax, Reg::Rcx);
@@ -243,29 +328,43 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
                 push_val_rax(buf);
             }
             Op::Mul => {
+                // (i<<1)*(j<<1) = (i*j)<<2, so shift right once to get
+                // the correctly-tagged product.
                 pop_val_rcx(buf);
                 pop_val_rax(buf);
                 imul_reg_reg(buf, Reg::Rax, Reg::Rcx);
+                sar_reg_1(buf, Reg::Rax);
                 push_val_rax(buf);
             }
             Op::Div => {
+                // (i<<1) / (j<<1) = i/j untagged. re-tag with shl.
                 pop_val_rcx(buf);
                 pop_val_rax(buf);
                 emit_divzero_guard(buf);
+                // untag both sides first so idiv operates on real ints.
+                sar_reg_1(buf, Reg::Rax);
+                sar_reg_1(buf, Reg::Rcx);
                 cqo(buf);
                 idiv_reg(buf, Reg::Rcx);
+                shl_reg_1(buf, Reg::Rax);
                 push_val_rax(buf);
             }
             Op::Mod => {
+                // same idea: untag, compute, remainder is untagged, re-tag.
                 pop_val_rcx(buf);
                 pop_val_rax(buf);
                 emit_divzero_guard(buf);
+                sar_reg_1(buf, Reg::Rax);
+                sar_reg_1(buf, Reg::Rcx);
                 cqo(buf);
                 idiv_reg(buf, Reg::Rcx);
                 mov_reg_reg(buf, Reg::Rax, Reg::Rdx);
+                shl_reg_1(buf, Reg::Rax);
                 push_val_rax(buf);
             }
             Op::Neg => {
+                // neg on the full 64-bit register is still correct: the
+                // sign flips, low tag bit flips 0->0 (int stays int).
                 pop_val_rax(buf);
                 neg_reg(buf, Reg::Rax);
                 push_val_rax(buf);
@@ -275,6 +374,9 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
                 test_reg_reg(buf, Reg::Rax, Reg::Rax);
                 setcc_al(buf, CC_E);
                 movzx_rax_al(buf);
+                // setcc gives 0/1 in al. to produce a tagged int we need
+                // to shift left by 1 so the result is 0 (false) or 2 (true).
+                shl_reg_1(buf, Reg::Rax);
                 push_val_rax(buf);
             }
             Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::Eq | Op::Ne => {
@@ -292,6 +394,8 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
                 };
                 setcc_al(buf, cc);
                 movzx_rax_al(buf);
+                // tag the 0/1 result.
+                shl_reg_1(buf, Reg::Rax);
                 push_val_rax(buf);
             }
             Op::Jump(rel) => {
@@ -302,13 +406,14 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
             Op::JumpIfFalse(rel) => {
                 let target_op = (i as isize + 1 + rel as isize) as usize;
                 pop_val_rax(buf);
+                // tagged int 0 == raw 0; any pointer has low bit set so
+                // it's non-zero; tagged int 1 is raw 2 (non-zero). so the
+                // plain `test rax, rax; jz` check is correct for truthy.
                 test_reg_reg(buf, Reg::Rax, Reg::Rax);
                 let patch = jcc_rel32(buf, CC_E, 0);
                 jump_patches.push((patch, target_op));
             }
             Op::Call(fn_id, _argc) => {
-                // rsp is 16-aligned inside the body. save r13 (+8) and pad (+8)
-                // so rsp stays 16-aligned before the call instruction.
                 push_reg(buf, Reg::R13);
                 push_reg(buf, Reg::Rdi); // alignment pad
                 let patch = call_rel32(buf, 0);
@@ -318,44 +423,100 @@ fn emit_fn(buf: &mut Vec<u8>, f: &Function) -> CompiledFn {
             }
             Op::Ret => {
                 pop_val_rax(buf); // ret value
-                mov_r14_r13(buf); // discard this frame's slots
-                push_val_rax(buf); // push ret value for caller
-                                   // epilogue. mov rsp, rbp + pop rbp undoes rbp push; but we still
-                                   // have our extra push rdi and push r13. mov rsp, rbp actually
-                                   // jumps over them all in one go.
+                mov_r14_r13(buf);
+                push_val_rax(buf);
                 mov_reg_reg(buf, Reg::Rsp, Reg::Rbp);
                 pop_reg(buf, Reg::Rbp);
                 ret(buf);
             }
             Op::Print => {
+                // tag-dispatched print. pop value into rax; branch on the
+                // low bit. int goes to jit_print_int (which shifts off the
+                // tag); ptr goes to jit_print_str (mask low bit off first).
+                //
+                //   pop_val_rax
+                //   test rax, 1
+                //   jz  print_int
+                //   <set rdi = rax & !1>; call jit_print_str
+                //   jmp done
+                // print_int:
+                //   <set rdi = rax>; call jit_print_int
+                // done:
                 pop_val_rax(buf);
+                test_reg_imm32(buf, Reg::Rax, 1);
+                // jz print_int  (zero flag set means low bit was 0 = int)
+                let jz_patch = jcc_rel32(buf, CC_E, 0);
+
+                // ---- string path ----
                 mov_reg_reg(buf, Reg::Rdi, Reg::Rax);
-                // callee-saved per sysv: rbx, rbp, r12-r15. jit_print is a
-                // rust fn and *should* preserve these, but some builds i've
-                // hit seem to leak r13/r14/r15 through the thread_local+
-                // format machinery. save them explicitly to be robust.
-                // rsp is 16-aligned inside the body; 4 pushes keep it so.
+                and_reg_imm8(buf, Reg::Rdi, !1i8);
                 push_reg(buf, Reg::R13);
                 push_reg(buf, Reg::R14);
                 push_reg(buf, Reg::R15);
-                push_reg(buf, Reg::Rdi); // alignment pad + preserves rdi
-                mov_reg_imm64(buf, Reg::Rax, jit_print as *const () as i64);
+                push_reg(buf, Reg::Rdi); // pad + preserve rdi
+                mov_reg_imm64(buf, Reg::Rax, jit_print_str as *const () as i64);
                 call_reg(buf, Reg::Rax);
                 pop_reg(buf, Reg::Rdi);
                 pop_reg(buf, Reg::R15);
                 pop_reg(buf, Reg::R14);
                 pop_reg(buf, Reg::R13);
+                let jmp_done = jmp_rel32(buf, 0);
+
+                // ---- int path ----
+                let int_start = buf.len();
+                patch_rel32(buf, jz_patch, int_start);
+                mov_reg_reg(buf, Reg::Rdi, Reg::Rax);
+                push_reg(buf, Reg::R13);
+                push_reg(buf, Reg::R14);
+                push_reg(buf, Reg::R15);
+                push_reg(buf, Reg::Rdi);
+                mov_reg_imm64(buf, Reg::Rax, jit_print_int as *const () as i64);
+                call_reg(buf, Reg::Rax);
+                pop_reg(buf, Reg::Rdi);
+                pop_reg(buf, Reg::R15);
+                pop_reg(buf, Reg::R14);
+                pop_reg(buf, Reg::R13);
+
+                let done = buf.len();
+                patch_rel32(buf, jmp_done, done);
+            }
+            Op::Str(id) => {
+                // bake the interned-literal pointer in as an imm64.
+                // or-in tag bit 1 to produce a tagged pointer.
+                let p = jit_heap.ptr_of(id as usize) as i64;
+                debug_assert_eq!(p & 1, 0, "jit literal not 8-aligned");
+                mov_reg_imm64(buf, Reg::Rax, p | 1);
+                push_val_rax(buf);
+            }
+            Op::StrLen => {
+                // pop tagged ptr, mask tag, read u32 len, shift left 1.
+                pop_val_rax(buf);
+                and_reg_imm8(buf, Reg::Rax, !1i8);
+                // mov eax, [rax]   (zero-extends to rax)
+                mov_r32_from_mem_reg(buf, Reg::Rax, Reg::Rax);
+                // tag: shl rax, 1.
+                shl_reg_1(buf, Reg::Rax);
+                push_val_rax(buf);
+            }
+            Op::Concat => {
+                // deferred to v0.3; see docs/v0.2-plan.md. the programs
+                // that need runtime concat run through the interp.
+                return Err(Error::Codegen(
+                    "jit does not support runtime string concat in v0.2 \
+                     (run with --interp for programs that concat at runtime)"
+                        .into(),
+                ));
             }
         }
     }
     op_offsets.push(buf.len());
 
-    CompiledFn {
+    Ok(CompiledFn {
         start,
         op_offsets,
         jump_patches,
         call_patches,
-    }
+    })
 }
 
 fn page_round_up(n: usize) -> usize {
@@ -364,13 +525,14 @@ fn page_round_up(n: usize) -> usize {
 }
 
 pub fn compile(prog: &Program) -> Result<CompiledModule> {
+    let jit_heap = JitHeap::build(&prog.string_pool);
+
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut compiled: Vec<CompiledFn> = Vec::with_capacity(prog.fns.len());
     for f in &prog.fns {
-        compiled.push(emit_fn(&mut buf, f));
+        compiled.push(emit_fn(&mut buf, f, &jit_heap)?);
     }
 
-    // intra-fn jumps
     for cc in &compiled {
         for &(at, target_op) in &cc.jump_patches {
             let target = cc.op_offsets[target_op];
@@ -378,7 +540,6 @@ pub fn compile(prog: &Program) -> Result<CompiledModule> {
         }
     }
 
-    // inter-fn call patches (rel32 within the code blob, so we can patch in buf directly)
     for cc in &compiled {
         for &(at, callee) in &cc.call_patches {
             let target = compiled[callee as usize].start;
@@ -387,10 +548,6 @@ pub fn compile(prog: &Program) -> Result<CompiledModule> {
     }
 
     let size = page_round_up(buf.len().max(1));
-    // platform flags:
-    // - linux: regular anon mapping, starts RW, mprotect to RX after write.
-    // - macos: needs MAP_JIT for unsigned processes. request RWX up-front and
-    //   toggle between writeable and executable via pthread_jit_write_protect_np.
     #[cfg(target_os = "macos")]
     let (flags, prot) = (
         libc::MAP_ANON | libc::MAP_PRIVATE | libc::MAP_JIT,
@@ -402,14 +559,11 @@ pub fn compile(prog: &Program) -> Result<CompiledModule> {
         libc::PROT_READ | libc::PROT_WRITE,
     );
 
-    // SAFETY: standard mmap call; arguments are validated above.
     let mem = unsafe { libc::mmap(std::ptr::null_mut(), size, prot, flags, -1, 0) };
     if mem == libc::MAP_FAILED {
         return Err(Error::Codegen("mmap failed".into()));
     }
 
-    // SAFETY: writing our emitted bytes into the freshly-allocated mapping.
-    // on macos we disable jit write-protect around the copy.
     unsafe {
         #[cfg(target_os = "macos")]
         jit_write_protect(false);
@@ -426,10 +580,6 @@ pub fn compile(prog: &Program) -> Result<CompiledModule> {
             }
         }
 
-        // flush the instruction cache so the freshly-written code is visible
-        // for execution. on x86-64 the icache is coherent with the dcache
-        // so this is a no-op in hardware, but sys_icache_invalidate is
-        // still the blessed macOS api.
         #[cfg(target_os = "macos")]
         sys_icache_invalidate(mem, size);
     }
@@ -440,6 +590,7 @@ pub fn compile(prog: &Program) -> Result<CompiledModule> {
         mem,
         size,
         main_entry,
+        jit_heap,
     })
 }
 
