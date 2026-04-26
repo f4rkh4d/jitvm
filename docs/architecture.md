@@ -172,7 +172,37 @@ patched up, mmap'd, marked executable, called via a single sysv64
 trampoline that hands in the val-stack base pointer. see
 `docs/jit-internals.md` for the full walk.
 
-## why i64 only
+## strings and the heap (v0.2)
+
+the v0.2 cut introduces a second value type: heap-allocated strings. to
+avoid doubling the val-stack slot width, values are tagged:
+
+- low bit 0: the upper 63 bits are a signed int (so the int range
+  shrank from i64 to i63).
+- low bit 1: the upper bits (with the tag masked off) are a pointer
+  into a heap arena. all heap allocations are 8-byte aligned so the
+  low 3 bits are free.
+
+see `src/value.rs` for the tag helpers and `src/heap.rs` for the
+arena + collector.
+
+the interp owns a `Heap` and walks it with a stop-the-world mark-and-
+copy collector whenever an allocation would cross a size threshold.
+roots are the current val stack + the active frame's slots + any
+pointers the calling op still holds in locals. literal strings are
+pre-interned on program load and kept alive for the whole run.
+
+the jit keeps a **separate, never-collected** arena of interned
+literals and bakes pointers into those literals as imm64 into the
+emitted code. the jit can print strings, read `len`, and load literal
+pointers, but it can't allocate at runtime in 0.2, so `Op::Concat`
+errors at codegen time. programs that concat at runtime go through the
+interp; the programs test has an `// interp-only` marker for those.
+
+gc-for-the-jit (with stackmaps and safepoints) is v0.3 work. see
+`docs/v0.2-plan.md` for the rationale.
+
+## why i64 only (historical, pre-v0.2)
 
 no strings means no heap. no heap means no gc. no gc means the jit never
 has to emit a safepoint, never has to cooperate with anyone, and every

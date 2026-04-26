@@ -5,30 +5,31 @@ i'm leaving it usable first, shippable second. everything below is
 aspirational and will arrive in whatever order i find time and an
 interesting-enough problem to chew on.
 
-## v0.2: strings and a gc
+## v0.2: strings and a gc (shipped, mostly)
 
-the big one. add a `String` type (immutable, heap-allocated) and a
-trivial mark-and-sweep gc over a `Gc<T>` handle. the hard part isn't
-the allocator, it's teaching the jit to cooperate: every `Call` site
-becomes a safepoint where the val stack needs a precise map of which
-slots are `Gc<T>` and which are `i64`. i expect this to reshape the ir
-(probably typed slots, probably a second parallel `Vec<Ty>` on
-`Function`) and force a real look at calling convention. concatenation,
-equality, indexing by i64, and a `len` builtin would be the minimum
-surface area to make it feel like a language.
+strings, tagged values, interp gc. the jit got literals + `len` +
+tag-dispatched `print` but punted on runtime concat and on jitting the
+gc itself (no stackmaps yet). see CHANGELOG and `docs/v0.2-plan.md` for
+the reality-check.
 
-## v0.3: aarch64 backend
+## v0.3: jit gc + tag-dispatch arithmetic + aarch64 backend
 
-currently the jit is x86-64 linux/macos only; on aarch64 the
-`run --jit` path errors out and `bench` silently runs only the
-interpreter. i'd like to fix that so my actual development machine
-(an apple silicon mac) can exercise the jit too. two shapes this could
-take: a separate `arm64.rs` that duplicates the work, or an `Encoder`
-trait abstracting over the two encoders with per-backend glue for
-calling conventions and cache flushing. the trait route is more work
-but keeps the ir-to-asm translation honest about what's actually shared
-between the two isas (not much, honestly, beyond the basic-block layout
-and the patch tables).
+three things the 0.2 cut deferred, merged into one release because
+they all touch the jit's cooperation story.
+
+- **jit gc.** safepoints at every call site (already there, just
+  unused) + a stackmap table mapping return-pc to live-slot counts +
+  calling the collector via a helper that preserves callee-saves. once
+  this works, `Op::Concat` stops being a codegen error.
+- **tag-dispatch `+` in the jit.** branch on the low bit; ints go
+  through the existing fast path, pointers dispatch to the concat
+  helper. this is mostly plumbing once jit gc is in.
+- **aarch64 backend.** my actual dev box is an apple silicon mac.
+  two shapes this could take: a separate `arm64.rs` that duplicates
+  the work, or an `Encoder` trait abstracting over the two encoders
+  with per-backend glue for calling conventions and cache flushing.
+  the trait route is more work but keeps the ir-to-asm translation
+  honest about what's shared (not much) between the two isas.
 
 ## v0.4: register allocation
 

@@ -1,6 +1,49 @@
 # changelog
 
-## unreleased
+## unreleased (v0.2)
+
+added:
+
+- heap-allocated immutable strings. `"..."` literals with `\n`, `\t`,
+  `\\`, `\"` escapes. `+` on strings concatenates (interp); `len(s)`
+  builtin; `print` dispatches between int and string.
+- string pool: source-level duplicates collapse to a single entry; the
+  engine pre-allocates each entry once on program load.
+- new `src/value.rs`: tagged 64-bit values. low bit 0 = int (i63), low
+  bit 1 = heap pointer (8-aligned so the tag bit is free). the int
+  range shrank from i64 to i63 as a result.
+- new `src/heap.rs`: bump-allocated arena with a stop-the-world
+  mark-and-copy collector. threshold-triggered, roots are the current
+  val stack + slots, forwarding-pointer scheme in-place.
+- jit tagged-form arithmetic. `(i<<1) + (j<<1) = (i+j)<<1` already
+  tagged, so `add/sub/neg` stay one instruction; `imul` needs a
+  follow-up `sar rax, 1`; `idiv` does `sar, sar, idiv, shl`; comparisons
+  get a trailing `shl rax, 1` to tag the boolean.
+- jit string support (literals only): `Op::Str(id)` bakes an imm64
+  pointer into a separate never-collected jit-owned arena, `Op::StrLen`
+  reads the header, `Op::Print` branches on tag and dispatches to
+  `jit_print_int` or `jit_print_str`.
+- tests: new `tests/heap_test.rs` (5 unit tests). new `str_hello`,
+  `str_concat`, `str_len`, `str_empty_concat`, `str_multi` programs in
+  `tests/programs/`. new `tests/programs_interp/` with `str_loop` and
+  `str_gc_stress` for programs the jit can't run in 0.2.
+- `examples/hello.jv`.
+
+known limitations:
+
+- the jit can't `+` strings at runtime; `Op::Concat` is a codegen-time
+  error. use `--interp` for programs that concat at runtime. (fixed in
+  v0.3, along with jit gc.)
+- gc is interp-only. the jit leaks its literal arena for the process
+  lifetime. safe in 0.2 because the jit has no other allocation sites.
+- int literals outside the i63 range are a parse error. previously the
+  language supported the full i64 range; `wrap.jv` was rewritten.
+- string equality is content-based (fnv-1a fast reject then memcmp).
+  interning is not forced on runtime-constructed strings.
+
+prior (unreleased) changes, carried over from the v0.1 -> v0.2 window:
+
+## unreleased (carried over)
 
 - runtime errors now carry source positions. div-by-zero and mod-by-zero
   in the interpreter report "runtime error at line N, col M: ...".

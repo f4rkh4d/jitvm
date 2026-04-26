@@ -238,6 +238,56 @@ EIP of the instruction immediately following the jump". concretely,
 `rel = target - (imm32_pos + 4)`. once i wrote the helper and audited
 every call site through it, the whole class of bug disappeared.
 
+## strings in the jit (v0.2)
+
+v0.2 introduced heap strings. the jit supports the minimum subset that
+doesn't require runtime allocation:
+
+- **literals.** `Op::Str(id)` bakes the interned-literal pointer in as
+  an imm64 and or-s in the tag bit: `mov rax, <ptr | 1>; push_val_rax`.
+  the literal arena is a `Box<[u8]>` owned by the `CompiledModule`;
+  the emitted code holds raw pointers into it, so it must outlive the
+  code.
+- **length.** `Op::StrLen` pops the tagged ptr, masks the tag off with
+  `and rax, 0xFE`, reads the first 4 bytes as a u32 (the `len`
+  header), and shifts left by 1 to re-tag the result as an int.
+- **print.** `Op::Print` branches on the low bit of the popped value
+  and calls either `jit_print_int` or `jit_print_str`. both helpers
+  take the raw register as-is (the int helper arithmetic-shifts the
+  tag off before formatting; the string helper masks the tag and
+  reads the header).
+
+what the jit does NOT support in 0.2:
+
+- **runtime concat.** `Op::Concat` errors at codegen time. the
+  reasoning is in `docs/v0.2-plan.md`: runtime concat needs a gc
+  safepoint at the call to the allocator, which needs a stackmap
+  matching every live value on the val stack to its tag. that whole
+  machinery is v0.3 work.
+- **tag dispatch on `+`.** the jit assumes both operands of `+` are
+  tagged ints and emits a plain 64-bit `add`. the interp still
+  tag-checks, so feeding a pointer to the jit where it expects an int
+  is caught in the test suite (the interp is the correctness oracle
+  and would fail first).
+
+### tagged-form arithmetic
+
+keeping values pre-tagged on the val stack lets most arithmetic stay
+a single instruction. the identities:
+
+```
+  (i<<1) + (j<<1) = (i+j) << 1       # add: no adjustment
+  (i<<1) - (j<<1) = (i-j) << 1       # sub: no adjustment
+  (i<<1) * (j<<1) = (i*j) << 2       # mul: sar rax, 1 after imul
+  (i<<1) / (j<<1) = (i/j)            # div: sar both inputs, shl result
+  (i<<1) % (j<<1) = (i%j) << 1       # mod: sar inputs, result is already tagged
+  neg(i<<1)       = (-i) << 1        # neg: works as-is
+```
+
+`cmp` on tagged ints gives the same ordering as on the underlying ints
+because left-shift is monotonic. `setcc al + movzx rax, al` writes a 0
+or 1 into rax, and one `shl rax, 1` tags the boolean as an int.
+
 ## what would be different next time
 
 the template jit is a great first approach because every op produces a

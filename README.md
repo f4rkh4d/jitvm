@@ -12,8 +12,9 @@ into mmap'd pages and jumps to it.
 
 one crate. source -> lexer -> pratt parser -> ast -> bytecode. the bytecode
 runs either on a stack interpreter (portable) or on native code emitted by a
-template jit (x86-64 linux/macos). no gc, no strings, no floats. i64 all the
-way down.
+template jit (x86-64 linux/macos). v0.2 adds heap strings with a
+mark-and-copy gc in the interp, print/len/+ for strings, and the i63 tag
+scheme that made it all possible.
 
 ## install
 
@@ -92,14 +93,17 @@ jitvm repl. :q to quit, :reset, :disasm
 
 ```
 // comments start with //
+fn greet(who) {
+  return "hello, " + who
+}
+
 fn fib(n) {
   if n < 2 { return n }
   return fib(n - 1) + fib(n - 2)
 }
 
 fn main() {
-  let x = 10
-  while x > 0 { x = x - 1 }
+  print greet("world")
   print fib(30)
 }
 ```
@@ -136,7 +140,10 @@ works:
 - fib(30) on the jit is ~11x faster than the interpreter on my box
 
 does not work:
-- no strings, no floats, no arrays, no gc
+- no floats, no arrays, no dicts
+- gc is interp-only for now. the jit handles string literals and `len`
+  but errors at codegen time if the program tries to `+` strings at
+  runtime. those programs go through `--interp`. (v0.3 lifts this.)
 - jit is x86-64 only (linux + macos). on aarch64 the `run --jit` path errors
   and `bench` just runs the vm.
 - no tail-call optimization
