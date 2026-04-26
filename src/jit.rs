@@ -58,10 +58,13 @@ pub extern "sysv64" fn jit_print_int(v: i64) {
 
 /// print a heap string. `ptr` is the header address; the `len` field is a
 /// u32 at offset 0 and the bytes start at offset 8.
-pub extern "sysv64" fn jit_print_str(ptr: *const u8) {
-    // SAFETY: the caller guarantees `ptr` came from a live literal in the
-    // jit's interned-literal arena (never collected in 0.2). we only read
-    // `len` (u32 at offset 0) and the `len` bytes at offset 8.
+/// # Safety
+///
+/// `ptr` must point at a live `StrHeader`: a readable `u32` len at offset 0
+/// followed by `len` readable bytes starting at offset 8. in the jit path
+/// this is always an interned literal in the never-collected arena.
+pub unsafe extern "sysv64" fn jit_print_str(ptr: *const u8) {
+    // SAFETY: per the function-level contract on `ptr`.
     let (len, bytes) = unsafe {
         let len = std::ptr::read_unaligned(ptr as *const u32) as usize;
         let data = ptr.add(8);
@@ -102,7 +105,7 @@ impl JitHeap {
         for s in pool {
             // pad start to 8 so each header is 8-aligned (low 3 bits zero,
             // which our tag scheme relies on).
-            while bytes.len() % 8 != 0 {
+            while !bytes.len().is_multiple_of(8) {
                 bytes.push(0);
             }
             offsets.push(bytes.len());
@@ -113,7 +116,7 @@ impl JitHeap {
             bytes.extend_from_slice(s.as_bytes());
         }
         // final pad
-        while bytes.len() % 8 != 0 {
+        while !bytes.len().is_multiple_of(8) {
             bytes.push(0);
         }
         JitHeap {
