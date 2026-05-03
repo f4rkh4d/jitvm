@@ -181,3 +181,7 @@ if you want to see what a serious jit looks like, read the V8 baseline compiler.
 ## See also
 
 - [github.com/f4rkh4d/jitvm/issues](https://github.com/f4rkh4d/jitvm/issues) for bug reports and feature requests
+
+## issues
+
+bug reports and feature requests are welcome at [github.com/f4rkh4d/jitvm/issues](https://github.com/f4rkh4d/jitvm/issues).
