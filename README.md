@@ -177,3 +177,11 @@ but the template jit pattern is great for a first attempt.
 a two-pass register allocator would buy us another 1.5x or so on a few benchmarks. it would also triple the size of the codegen module and the point of jitvm is "small enough to fit in your head". the current allocator is intentionally bad: it picks the next free callee-saved register, falls back to spilling, and the spill code is dumb.
 
 if you want to see what a serious jit looks like, read the V8 baseline compiler. this is the version where you can read every line in an afternoon.
+
+## See also
+
+- [github.com/f4rkh4d/jitvm/issues](https://github.com/f4rkh4d/jitvm/issues) for bug reports and feature requests
+
+## issues
+
+bug reports and feature requests are welcome at [github.com/f4rkh4d/jitvm/issues](https://github.com/f4rkh4d/jitvm/issues).
